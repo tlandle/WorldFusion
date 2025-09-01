@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# Author: Tyler Landle <tlandle3@gatech.edu>
 # Author: Binyu Zhao <byzhao@stu.hit.edu>
 # Author: Runsheng Xu <rxx3386@ucla.edu>
 # License: TDG-Attribution-NonCommercial-NoDistrib
@@ -11,6 +12,7 @@ import math
 import bisect
 import torch
 import numpy as np
+import json
 from PIL import Image
 from collections import OrderedDict
 
@@ -161,6 +163,14 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         self.pre_processor = build_preprocessor(params['preprocess'], train)
         self.post_processor = post_processor.build_postprocessor(params['postprocess'], dataset='opv2v', train=train)
 
+        anchor_file = params.get('anchor_file', 'opv2v_anchors.json')
+        try:
+            with open(anchor_file, 'r') as f:
+                self.scenario_anchors = json.load(f)
+        except FileNotFoundError:
+            print(f"Anchor file {anchor_file} not found. Using default anchors.")
+            self.scenario_anchors = {}
+        
         if 'train_params' not in params or 'max_cav' not in params['train_params']:
             self.max_cav = 7
         else:
@@ -256,12 +266,14 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
                         self.len_record.append(self.len_record[-1] + len(timestamps))
                 else:
                     self.scenario_database[i][cav_id]['ego'] = False
+        self.scenario_folders = scenario_folders
         print('dataset length: ', self.len_record[-1])
 
     def __len__(self):
         return self.len_record[-1]
 
     def __getitem__(self, idx):
+
         base_data_dict = self.retrieve_base_data(idx, cur_ego_pose_flag=self.cur_ego_pose_flag)
 
         ego_id = -1
@@ -277,8 +289,19 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         assert ego_id != -1
         assert len(ego_lidar_pose) > 0
 
+        # MOVE THIS BLOCK FROM THE END TO HERE
+        # find scenario_index and world anchor BEFORE processing CAVs
+        scenario_index = 0
+        for i, ele in enumerate(self.len_record):
+            if idx < ele:
+                scenario_index = i
+                break
+        scenario_path = self.scenario_folders[scenario_index]
+        scenario_name = os.path.basename(scenario_path)
+        world_anchor = self.scenario_anchors.get(scenario_name, [0.0, 0.0, 0.0])
+
         pairwise_t_matrix, img_pairwise_t_matrix = self.get_pairwise_transformation(base_data_dict, self.max_cav)
-        
+    
         agents_image_inputs = []
         processed_features = []
         object_stack = []
@@ -303,7 +326,13 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
             if distance > opencood.data_utils.datasets.COM_RANGE:
                 continue
 
-            selected_cav_processed = self.get_item_single_car(selected_cav_base, ego_lidar_pose, cav_id)
+            # PASS WORLD ANCHOR TO get_item_single_car
+            selected_cav_processed = self.get_item_single_car(
+                selected_cav_base, 
+                ego_lidar_pose, 
+                cav_id,
+                world_anchor=world_anchor  # ADD THIS
+            )
 
             object_id_stack += selected_cav_processed['object_ids']
             object_stack.append(selected_cav_processed['object_bbx_center'])
@@ -348,7 +377,13 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         anchor_box = self.post_processor.generate_anchor_box()
 
         # generate targets label
-        label_dict = self.post_processor.generate_label(gt_box_center=object_bbx_center,anchors=anchor_box,mask=mask)
+        label_dict = self.post_processor.generate_label(
+            gt_box_center=object_bbx_center,
+            anchors=anchor_box,
+            mask=mask,
+            world_anchor=world_anchor,  # Add this
+            ego_pose=ego_lidar_pose    # Add this
+        )
 
         # pad dv, dt, infra to max_cav
         velocity = velocity + (self.max_cav - len(velocity)) * [0.]
@@ -603,7 +638,7 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         
         return delay_params
 
-    def get_item_single_car(self, selected_cav_base, ego_pose, cav_id=None):
+    def get_item_single_car(self, selected_cav_base, ego_pose, cav_id=None, world_anchor=None):
         """
         Project the lidar and bbx to ego space first, and then do clipping.
 
@@ -619,6 +654,24 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         selected_cav_processed : dict
             The dictionary contains the cav's processed information.
         """
+
+        # Calculate the transformation matrix
+        transformation_matrix = selected_cav_base['params']['transformation_matrix']
+
+        # USE WORLD ANCHOR FOR GROUND TRUTH IF AVAILABLE
+        if world_anchor is not None:
+            # Generate ground truth in world coordinates
+            reference_pose = [world_anchor[0], world_anchor[1], world_anchor[2], 0, 0, 0]
+            object_bbx_center, object_bbx_mask, object_ids = self.post_processor.generate_object_center(
+                [selected_cav_base], 
+                reference_pose
+            )
+        else:
+            # Fallback to ego coordinates if no world anchor
+            object_bbx_center, object_bbx_mask, object_ids = self.post_processor.generate_object_center(
+                [selected_cav_base], 
+                ego_pose
+            )
         # Transformation matrix, intrinsic(cam_K)
         camera_to_lidar_matrix = np.array(selected_cav_base['params']['camera2lidar_matrix']).reshape(4,4,4).astype(np.float32)
         # lidar_to_camera_matrix = np.array(selected_cav_base['params']['lidar2camera_matrix']).astype(np.float32)
@@ -654,14 +707,6 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         }
         # for key, value in selected_cav_processed['image_inputs'].items():
         #     print(value.shape)
-
-        # process lidar data
-
-        # calculate the transformation matrix
-        transformation_matrix = selected_cav_base['params']['transformation_matrix']
-
-        # retrieve objects under ego coordinates
-        object_bbx_center, object_bbx_mask, object_ids = self.post_processor.generate_object_center([selected_cav_base],ego_pose)
 
         # filter lidar
         lidar_np = selected_cav_base['lidar_np']
@@ -839,6 +884,13 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         pairwise_t_matrix = torch.from_numpy(np.array(pairwise_t_matrix_list))
         img_pairwise_t_matrix = torch.from_numpy(np.array(img_pairwise_t_matrix_list))
 
+        world_anchors = []
+        for i in range(len(batch)):
+            ego_dict = batch[i]['ego']
+            # other record_len, lidar_poses, etc.
+            world_anchors.append(ego_dict.get('world_anchor', [0.0, 0.0, 0.0]))
+            # existing code appending velocity, time_delay, etc.
+
         # object id is only used during inference, where batch size is 1.
         # so here we only get the first element.
         output_dict = {
@@ -859,6 +911,8 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
                 'ego_flag': ego_flag
             }
         }
+
+        output_dict['ego']['world_anchor'] = world_anchors
 
 
         if self.visualize:

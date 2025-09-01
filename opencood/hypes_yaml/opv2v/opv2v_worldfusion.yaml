@@ -9,7 +9,7 @@ name: worldfusion_opv2v_det
 
 # ---------- DATA -------------------------------------------------------------
 root_dir:        "data/OPV2V/train"      # <‑‑ edit for V2X‑Sim
-validate_dir:    "data/OPV2V/validate"
+validate_dir:    "data/OPV2V/test"
 test_dir:        "data/OPV2V/test"
 
 yaml_parser:     "load_cross_modal_point_pillar_params"
@@ -59,9 +59,18 @@ fusion:
       cams:   ['camera0','camera1','camera2','camera3']
       Ncams:  4
 
+
+data_augment:
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x' ]
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
 # ---------- ANCHOR / POST‑PROCESS -------------------------------------------
 postprocess:
-  core_method: 'VoxelPostprocessor'
+  core_method: 'WorldVoxelPostprocessor'
   gt_range: *cav_range
   anchor_args:
     cav_lidar_range: *cav_range
@@ -154,6 +163,9 @@ model:
         gaussian_smooth:
           k_size: 5
           c_sigma: 1.0
+      agg_operator:
+        mode: 'ATTEN'          # <‑‑ attention fusion
+        feature_dim: 256       # dimension of the BEV feature map
 
     # --------------- world canvas  -----------------------   # <‑‑ NEW
     canvas_res:    0.5       # metres / pixel

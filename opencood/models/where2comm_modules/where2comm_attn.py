@@ -297,6 +297,8 @@ class Where2comm(nn.Module):
                     t_matrix = pairwise_t_matrix[b][:N, :N, :, :]
                     node_features = batch_node_features[b]
                     C, H, W = node_features.shape[1:]
+                    print(f"node_features shape: {node_features.shape}")  # [N, C, H, W]
+                    print(f"t_matrix[0] shape: {t_matrix[0].shape}")      # [N, 2, 3]
                     neighbor_feature = warp_affine_simple(node_features,
                                                     t_matrix[0, :, :, :],
                                                     (H, W))

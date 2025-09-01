@@ -1,5 +1,6 @@
 """
 # Author: Binyu Zhao <byzhao@stu.hit.edu.cn>
+# Author: Tyler Landle <tlandle3@gatech.edu>
 """
 
 from numpy import record

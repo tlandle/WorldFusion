@@ -11,7 +11,7 @@ class Communication(nn.Module):
         super(Communication, self).__init__()
         
         self.smooth = False
-        self.thre = args['thre']
+        self.threshold = args['threshold']
         if 'gaussian_smooth' in args:
             # Gaussian Smooth
             self.smooth = True
@@ -34,7 +34,7 @@ class Communication(nn.Module):
     def forward(self, batch_x, batch_confidence_maps, record_len, pairwise_t_matrix):
         # batch_confidence_maps:[(L1, H, W), (L2, H, W), ...]
         # pairwise_t_matrix: (B,L,L,2,3)
-        # thre: threshold of objectiveness
+        # threshold: thresholdshold of objectiveness
         # a_ji = (1 - q_i)*q_ji
         B, L, _, _, _ = pairwise_t_matrix.shape
         _, _, H, W = batch_confidence_maps[0].shape
@@ -61,11 +61,11 @@ class Communication(nn.Module):
 
             ones_mask = torch.ones_like(communication_maps).to(communication_maps.device)
             zeros_mask = torch.zeros_like(communication_maps).to(communication_maps.device)
-            communication_mask = torch.where(communication_maps>self.thre, ones_mask, zeros_mask)
+            communication_mask = torch.where(communication_maps>self.threshold, ones_mask, zeros_mask)
 
             communication_rate = communication_mask[0].sum()/(H*W)
             communication_vol.append((batch_x[b]*communication_mask).count_nonzero().item())
-            # rint(self.thre, batch_x[b].shape, communication_vol[-1])
+            # rint(self.threshold, batch_x[b].shape, communication_vol[-1])
 
             # communication_mask = warp_affine_simple(communication_mask,
             #                                 t_matrix[0, :, :, :],
