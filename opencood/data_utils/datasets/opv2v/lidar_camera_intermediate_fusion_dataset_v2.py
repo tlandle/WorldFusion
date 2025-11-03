@@ -160,6 +160,7 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         self.train = train
 
         self.data_augmentor = DataAugmentor(params['data_augment'], train)
+
         self.pre_processor = build_preprocessor(params['preprocess'], train)
         self.post_processor = post_processor.build_postprocessor(params['postprocess'], dataset='opv2v', train=train)
 
@@ -175,6 +176,16 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
             self.max_cav = 7
         else:
             self.max_cav = params['train_params']['max_cav']
+
+
+        if 'world_voxel_postprocessor' in self.params['postprocess']['core_method']:
+            anchor_params = self.params['postprocess']['anchor_args']
+            self.canvas_size_m = anchor_params['canvas_size_m']
+            self.world_range = [-self.canvas_size_m / 2, -self.canvas_size_m / 2, -3,
+                                self.canvas_size_m / 2,  self.canvas_size_m / 2, 1]
+            print(f"Dataset using world canvas range: {self.world_range}")
+        else:
+            self.world_range = self.params['preprocess']['cav_lidar_range']
         
         # if project first, cav's lidar will first be projected to the ego's coordinate frame. otherwise, the feature will be projected instead.
         self.proj_first = params['fusion']['args']['proj_first'] if 'proj_first' in params['fusion']['args'] else False
@@ -414,8 +425,85 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
             'ego_flag': ego_flag
         }
 
+        # ... (other list initializations) ...
+        spatial_correction_matrix = []
+        
+        # FIX: Move this line out of the "if self.visualize" block below
+        projected_lidar_stack = []
+
         if self.visualize:
             processed_data_dict['ego'].update({'origin_lidar': np.vstack(projected_lidar_stack)})
+
+        # In __getitem__(self, idx), before the final "return" statement:
+
+        # =================== START ROBUST DEBUG VISUALIZATION ===================
+        import matplotlib.pyplot as plt
+
+        # Plot for the first 50 samples to guarantee we see the lead-up to any early crash.
+        if idx < 50:
+            try:
+                print(f"Attempting to generate debug plot for index {idx}...")
+                
+                # --- Create a dedicated directory for plots ---
+                save_dir = os.path.join(os.getcwd(), "debug_plots")
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, f'debug_world_canvas_idx_{idx}.png')
+
+                plt.figure(figsize=(12, 12))
+                
+                # 1. Plot all unclipped agent point clouds
+                if projected_lidar_stack:
+                    all_points = np.vstack(projected_lidar_stack)
+                    plt.scatter(all_points[:, 0], all_points[:, 1], s=0.5, c='gray', label='All World Points')
+                else:
+                    print(f"Warning: projected_lidar_stack is empty for index {idx}.")
+
+                # 2. Draw the canvas boundary
+                canvas_size = self.params['postprocess']['anchor_args']['canvas_size_m']
+                canvas_boundary = plt.Rectangle(
+                    (-canvas_size / 2, -canvas_size / 2),
+                    canvas_size, canvas_size,
+                    fill=False, edgecolor='r', linewidth=2, label=f'{canvas_size}x{canvas_size}m Canvas'
+                )
+                plt.gca().add_patch(canvas_boundary)
+
+                # 3. Plot the transformed Ground Truth boxes (if any exist)
+                valid_gt_boxes = object_bbx_center[mask == 1]
+                if valid_gt_boxes.shape[0] > 0:
+                    # FIX: Use the correct function x1_to_x2 to get the transformation matrix
+                    world_anchor_pose = [world_anchor[0], world_anchor[1], world_anchor[2], 0, 0, 0]
+                    T_ego_to_world = transformation_utils.x1_to_x2(ego_lidar_pose, world_anchor_pose)
+
+                    # FIX: Convert GT box centers to corners *before* projecting
+                    gt_corners_ego = box_utils.boxes_to_corners_3d(valid_gt_boxes, order='hwl')
+                    gt_corners_world = box_utils.project_box3d(gt_corners_ego, T_ego_to_world)
+                    
+                    for i in range(gt_corners_world.shape[0]):
+                        corners = gt_corners_world[i]
+                        # The corners need to form a closed loop for plotting
+                        corners_closed = np.vstack([corners[:4], corners[0]]) # Just plot the 2D base
+                        plt.plot(corners_closed[:, 0], corners_closed[:, 1], c='g', label='GT Boxes' if i == 0 else "")
+
+                plt.title(f'Debug Visualization for Sample Index {idx}')
+                plt.xlabel('X (meters)')
+                plt.ylabel('Y (meters)')
+                plt.legend()
+                plt.grid(True)
+                plt.axis('equal')
+                
+                # --- Save the plot and print a confirmation message ---
+                plt.savefig(save_path)
+                print(f"✅ Plot successfully saved to: {save_path}")
+
+            except Exception as e:
+                # --- If anything goes wrong, print a clear error message ---
+                import traceback
+                print(f"❌ FAILED to generate or save plot for index {idx}: {e}")
+                traceback.print_exc() # Print full traceback for the plotting error
+            finally:
+                # --- Always close the plot to prevent memory leaks ---
+                plt.close()
+   
         return processed_data_dict
 
     def retrieve_base_data(self, idx, cur_ego_pose_flag=True):
@@ -708,17 +796,27 @@ class LiDARCameraIntermediateFusionDataset(torch.utils.data.Dataset):
         # for key, value in selected_cav_processed['image_inputs'].items():
         #     print(value.shape)
 
-        # filter lidar
+
         lidar_np = selected_cav_base['lidar_np']
         lidar_np = pcd_utils.shuffle_points(lidar_np)
-        # remove points that hit itself
         lidar_np = pcd_utils.mask_ego_points(lidar_np)
 
-        # project the lidar to ego space
-        # xyzi_for_ego = deepcopy(lidar_np)
-        if self.proj_first:
+
+        if world_anchor is not None:
+            cav_pose = selected_cav_base['params']['lidar_pose']
+            T_cav_to_anchor = transformation_utils.x1_to_x2(
+                cav_pose,
+                [world_anchor[0], world_anchor[1], world_anchor[2], 0, 0, 0]
+            )
+            lidar_np[:, :3] = box_utils.project_points_by_matrix_torch(lidar_np[:, :3], T_cav_to_anchor)
+            # Use the correct world range for masking
+            lidar_np = pcd_utils.mask_points_by_range(lidar_np, self.world_range)
+        elif self.proj_first:
             lidar_np[:, :3] = box_utils.project_points_by_matrix_torch(lidar_np[:, :3], transformation_matrix)
-        lidar_np = pcd_utils.mask_points_by_range(lidar_np, self.params['preprocess']['cav_lidar_range'])
+            # Even if projecting to ego, mask by the appropriate range
+            lidar_np = pcd_utils.mask_points_by_range(lidar_np, self.params['preprocess']['cav_lidar_range'])
+
+        # Mask and voxelize - this will produce 704×192 indices as expected
         processed_lidar = self.pre_processor.preprocess(lidar_np)
 
         # ============================================================================================================

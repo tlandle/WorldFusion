@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Compute per‑scenario global anchors for OPV2V.
+Compute per-scenario global anchors for OPV2V based on the initial scene centroid.
 
-This script scans each scenario directory in an OPV2V dataset (e.g. data/OPV2V/train)
-and extracts the lidar_pose entries from every agent’s YAML file.  It then
-computes a static anchor as the centre of the bounding box of all x,y,z values.
+This script scans each scenario directory in an OPV2V dataset and identifies
+the first timestamp. It then reads the lidar_pose of every agent present at
+that initial timestamp and computes the anchor as the mean (average) of their
+x, y, z positions. This ensures the static anchor is centered on the action
+at the beginning of the scenario.
+
 The results are saved in opv2v_anchors.json in the current directory.
-
-It does not rely on PyYAML loaders, so it won’t choke on numpy tags.
 """
 
 import os
@@ -15,11 +16,12 @@ import glob
 import re
 import json
 import sys
+import numpy as np
 
 def read_lidar_pose(filepath):
     """
     Extract [x,y,z,roll,yaw,pitch] from a YAML by looking for 'lidar_pose:'.
-    Handles both inline list and multi‑line forms.
+    Handles both inline list and multi-line forms.
 
     Returns a list of 6 floats or raises ValueError if not found.
     """
@@ -52,25 +54,42 @@ def read_lidar_pose(filepath):
     raise ValueError(f"lidar_pose not found in {filepath}")
 
 def compute_anchor_for_scenario(scenario_path):
-    xs, ys, zs = [], [], []
-    for cav_id in os.listdir(scenario_path):
-        cav_path = os.path.join(scenario_path, cav_id)
-        if not os.path.isdir(cav_path):
-            continue
-        for yml in glob.glob(os.path.join(cav_path, '*.yaml')):
-            try:
-                pose = read_lidar_pose(yml)
-            except Exception:
-                continue
-            xs.append(pose[0])
-            ys.append(pose[1])
-            zs.append(pose[2])
-    if not xs:
+    """
+    MODIFIED: Calculates the anchor as the average position of all vehicles
+    at the first timestamp of the scenario.
+    """
+    cav_paths = [os.path.join(scenario_path, cav_id) for cav_id in os.listdir(scenario_path) if os.path.isdir(os.path.join(scenario_path, cav_id))]
+    if not cav_paths:
         return [0.0, 0.0, 0.0]
-    x_anchor = 0.5 * (max(xs) + min(xs))
-    y_anchor = 0.5 * (max(ys) + min(ys))
-    z_anchor = 0.5 * (max(zs) + min(zs))
-    return [x_anchor, y_anchor, z_anchor]
+
+    # Find the first timestamp by looking at the first agent's sorted yaml files
+    try:
+        all_yamls = sorted(glob.glob(os.path.join(cav_paths[0], '*.yaml')))
+        first_yaml_path = all_yamls[0]
+        first_timestamp = os.path.basename(first_yaml_path).replace('.yaml', '')
+    except IndexError:
+        print(f"Warning: No yaml files found in {cav_paths[0]}, skipping scenario.")
+        return [0.0, 0.0, 0.0]
+
+    initial_poses = []
+    for cav_path in cav_paths:
+        # Construct the path to the yaml for the first timestamp for this agent
+        initial_yaml_for_cav = os.path.join(cav_path, f"{first_timestamp}.yaml")
+        if os.path.exists(initial_yaml_for_cav):
+            try:
+                pose = read_lidar_pose(initial_yaml_for_cav)
+                initial_poses.append(pose[:3]) # Only need [x, y, z]
+            except Exception as e:
+                print(f"Warning: Could not read pose from {initial_yaml_for_cav}: {e}")
+                continue
+    
+    if not initial_poses:
+        print(f"Warning: No valid initial poses found for scenario {os.path.basename(scenario_path)}")
+        return [0.0, 0.0, 0.0]
+    
+    # Calculate the mean (average) position of all vehicles at the start
+    anchor = np.mean(np.array(initial_poses), axis=0)
+    return anchor.tolist()
 
 def main(root_dir):
     anchors = {}
@@ -80,13 +99,16 @@ def main(root_dir):
             continue
         anchors[scenario_name] = compute_anchor_for_scenario(scenario_path)
         print(f"{scenario_name}: {anchors[scenario_name]}")
+        
     with open('opv2v_anchors.json', 'w') as f:
         json.dump(anchors, f, indent=2)
-    print("Wrote anchors to opv2v_anchors.json")
+    print("\n✅ Wrote new anchors to opv2v_anchors.json")
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python compute_global_anchors.py <path_to_OPV2V/train>")
+        print("Usage: python compute_global_anchors.py <path_to_OPV2V_dataset_root>")
+        print("Example: python compute_global_anchors.py data/opv2v/train")
     else:
         main(sys.argv[1])
+
 

@@ -159,6 +159,10 @@ def main():
                             for round_id in range(1, comm['round']):
                                 round_loss_v += criterion(output_dict, batch_data['ego']['label_dict'], prefix='_v{}'.format(round_id))
 
+            if i % 10 == 0:
+                max_conf = torch.sigmoid(output_dict['psm']).max().item()
+                print(f"Batch {i}: max_conf={max_conf:.4f}")
+
             # criterion.logging(epoch, i, len(train_loader), writer)
             criterion.logging(epoch, i, len(train_loader), writer)
 

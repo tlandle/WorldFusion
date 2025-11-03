@@ -5,21 +5,29 @@
 #   • v2x-sim: change root_dir / validate_dir / test_dir
 # ==========================================================
 
-name: worldfusion_opv2v_det
+name: worldfusion_v2xsim_det
 
 # ---------- data -------------------------------------------------------------
-root_dir:       "data/OPV2V/train"
-validate_dir:   "data/OPV2V/test"
-test_dir:       "data/OPV2V/test"
+root_dir:       "data/v2xsim2_info/v2xsim_infos_train.pkl"
+validate_dir:   "data/v2xsim2_info/v2xsim_infos_val.pkl"
+test_dir:       "data/v2xsim2_info/v2xsim_infos_test.pkl"
 
 yaml_parser:    "load_cross_modal_point_pillar_params"
 
 train_params:
-  batch_size:   1
-  epoches:      50
-  eval_freq:    1
-  save_freq:    1
+  batch_size:   16
+  epoches:      30
+  eval_freq:    2
+  save_freq:    3
   max_cav:      5
+
+noise_setting:
+  add_noise: true
+  args:
+    pos_std: 0.2
+    rot_std: 0.2
+    pos_mean: 0
+    rot_mean: 0
 
 comm_range: 70
 
@@ -46,7 +54,7 @@ preprocess:
 
 # ---------- fusion (dataset side) -------------------------------------------
 fusion:
-  core_method: 'LiDARCameraIntermediateFusionDatasetOPV2V_V2'
+  core_method: 'LiDARCameraIntermediateFusionDatasetV2XSim'
   args:
     proj_first: True
     # FIX: Define a world-centric grid for camera BEV projection.
@@ -206,4 +214,3 @@ lr_scheduler:
   warmup_lr:     2e-5
   warmup_epoches: 5
   lr_min:        5e-6
-
